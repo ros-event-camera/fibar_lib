@@ -4,7 +4,7 @@
   <version>1.0.0</version>
   <description>FIBAR event image reconstruction library</description>
   <maintainer email="bernd.pfrommer@gmail.com">Bernd Pfrommer</maintainer>
-  <license>Apache2</license>
+  <license>Apache License 2.0</license>
   <depend>clang-tidy</depend>
   <test_depend>gtest</test_depend>
   <export>
