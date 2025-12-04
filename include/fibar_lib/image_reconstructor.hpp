@@ -106,8 +106,12 @@ public:
       auto & s = state_[e.y() * width_ + e.x()];
 #ifdef SANITY_CHECKS
       if (!s.isActive()) {
-        std::cerr << e.x() << " " << e.y() << " is inactive!" << std::endl;
-        throw std::runtime_error("inactivating inactive pixel!");
+        std::cerr << "FIBAR: pixel at (" << e.x() << "," << e.y() << ") has bad activity counter!"
+                  << std::endl;
+        std::cerr << "FIBAR: likely this is a hot(bad) pixel. Mask it out in the camera driver!"
+                  << std::endl;
+        throw std::runtime_error(
+          "bad activity counter at pixel " + std::to_string(e.x()) + "," + std::to_string(e.y()));
       }
 #endif
       s.decNumEventsInQueue();
@@ -125,7 +129,8 @@ public:
         if (tile.getNumPixActive() == 0) {
           std::cerr << e.x() << " " << e.y() << " tile " << getTileIdx(e.x(), e.y()) << " is empty!"
                     << std::endl;
-          throw std::runtime_error("empty tile!");
+          throw std::runtime_error(
+            "empty tile at " + std::to_string(e.x()) + "," + std::to_string(e.y()));
         }
 #endif
         // remove number of pixels in this tile
