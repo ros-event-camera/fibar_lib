@@ -22,21 +22,18 @@
 
 namespace fibar_lib
 {
-class State
+class BaseState
 {
 public:
   using state_t = float;
-  explicit State(state_t L_a = 0, state_t pbar_a = 0, uint8_t npa = 0, uint16_t neiq = 0)
-  : L(L_a), pbar(pbar_a), num_pix_active(npa), num_events_in_queue(neiq)
-  {
-  }
-  inline void operator+=(const State & s)
+  explicit BaseState(state_t L_a = 0, state_t pbar_a = 0) : L(L_a), pbar(pbar_a) {}
+  inline void operator+=(const BaseState & s)
   {
     L += s.L;
     // leave other fields untouched
   }
 
-  inline State operator*(const float c) const { return (State(c * L)); }
+  inline BaseState operator*(const float c) const { return (BaseState(c * L)); }
 
   inline state_t getL() const { return (L); }
   inline state_t getPbar() const { return (pbar); }
@@ -45,8 +42,37 @@ public:
 #ifdef RESCALE
   inline state_t getScale() const { return (scale); }
 #endif
+  // make variables public so they can be exposed to e.g. pybind11
+  // ------ variables -------
+  state_t L{0};
+  state_t pbar{0};
+#ifdef RESCALE
+  state_t scale{1.0};
+#endif
+private:
+};
 
-  // ----------- related to activity -----------------------
+template <bool WithActivity = true>
+class State : public BaseState
+{
+};
+
+template <>
+class State<false> : public BaseState
+{
+public:
+  explicit State(state_t L_a = 0, state_t pbar_a = 0) : BaseState(L_a, pbar_a) {}
+};
+
+template <>
+class State<true> : public BaseState
+{
+public:
+  explicit State(state_t L_a = 0, state_t pbar_a = 0, uint8_t npa = 0, uint16_t neiq = 0)
+  : BaseState(L_a, pbar_a), num_pix_active(npa), num_events_in_queue(neiq)
+  {
+  }
+
   inline uint16_t getNumEventsInQueue() const { return (num_events_in_queue); }
   inline uint8_t getNumPixActive() const { return (num_pix_active); }
 
@@ -55,19 +81,11 @@ public:
   inline void decNumPixActive() { num_pix_active--; }
   inline void incNumEventsInQueue() { num_events_in_queue++; }
   inline void decNumEventsInQueue() { num_events_in_queue--; }
-
-  // make variables public so they can be exposed to e.g. pybind11
   // ------ variables -------
-  state_t L{0};
-  state_t pbar{0};
   uint8_t num_pix_active{0};
   uint16_t num_events_in_queue{0};
-#ifdef RESCALE
-  state_t scale{1.0};
-#endif
   static constexpr int max_num_active() { return (255); };  // 8 bit
-
-private:
 };
+
 }  // namespace fibar_lib
 #endif  // FIBAR_LIB_STATE_HPP

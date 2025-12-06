@@ -48,25 +48,30 @@ inline size_t getTileIndex<2>(uint16_t ex, uint16_t ey, uint16_t tile_stride_y)
   return ((ey >> 1) * tile_stride_y + (ex & ~1));
 }
 
-template <uint8_t tile_size = 2>
-class ImageReconstructor
+template <bool filter_spatially>
+class BaseImageReconstructor
 {
 public:
   using state_t = float;
-  static constexpr std::array<std::array<state_t, 3>, 3> GAUSSIAN_3x3 = {
-    {{0.0625, 0.125, 0.0625}, {0.125, 0.25, 0.125}, {0.0625, 0.125, 0.0625}}};
-  static constexpr std::array<std::array<state_t, 5>, 5> GAUSSIAN_5x5 = {
-    {{0.003663, 0.01465201, 0.02564103, 0.01465201, 0.003663},
-     {0.01465201, 0.05860806, 0.0952381, 0.05860806, 0.01465201},
-     {0.02564103, 0.0952381, 0.15018315, 0.0952381, 0.02564103},
-     {0.01465201, 0.05860806, 0.0952381, 0.05860806, 0.01465201},
-     {0.003663, 0.01465201, 0.02564103, 0.01465201, 0.003663}}};
 
-  ImageReconstructor() = default;
-
-  void event(uint32_t t, uint16_t ex, uint16_t ey, uint8_t polarity)
+  void initialize(size_t width, size_t height, uint32_t cutoff_time)
   {
-    auto & s = state_[ey * width_ + ex];
+    width_ = width;
+    height_ = height;
+    // compute filter coefficients
+    double alpha(0);
+    double beta(0);
+    computeAlphaBeta(static_cast<double>(cutoff_time), &alpha, &beta);
+    c_[0] = static_cast<float>(alpha);
+    c_[1] = static_cast<float>(1.0 - alpha);
+    c_[2] = static_cast<float>(beta);
+    c_[3] = static_cast<float>(0.5 * (1 + beta));
+    state_.resize(width * height, State<filter_spatially>());
+  }
+
+  inline void update_filter(
+    State<filter_spatially> & s, uint32_t t, uint16_t ex, uint16_t ey, uint8_t polarity)
+  {
     const auto p = static_cast<state_t>((polarity == 0) ? -1 : 1);
 #ifdef RESCALE
     // change in polarity, will be scale * (0 or +-2)
@@ -80,135 +85,18 @@ public:
     // update state
     s.setPbar(s.getPbar() * c_[0] + p * c_[1]);
     s.setL(L);
-    // run activity detector
-#define USE_SPATIAL_FILTER
-#ifdef USE_SPATIAL_FILTER
-    if (!s.isActive()) {
-      num_occupied_pixels_ += fill_ratio_denom_;
-      // state of top left corner of tile has actual pixel-in-tile count
-      auto & tile = state_[getTileIdx(ex, ey)];
-      if (tile.getNumPixActive() == 0) {
-        num_occupied_tiles_ += fill_ratio_num_;  // first active pixel in this tile
-      }
-      tile.incNumPixActive();  // bump number of pixels in this tile
-    }
-    s.incNumEventsInQueue();
-    events_.push_back(Event(ex, ey, static_cast<int8_t>(polarity)));
-    processEventQueue();  // adjusts size of event window
-#endif
-    current_time_ = t;
   }
-
-  void processEventQueue()
-  {
-    while (events_.size() > event_window_size_) {
-      const Event & e = events_.front();
-      auto & s = state_[e.y() * width_ + e.x()];
-#ifdef SANITY_CHECKS
-      if (!s.isActive()) {
-        std::cerr << "FIBAR: pixel at (" << e.x() << "," << e.y() << ") has bad activity counter!"
-                  << std::endl;
-        std::cerr << "FIBAR: likely this is a hot(bad) pixel. Mask it out in the camera driver!"
-                  << std::endl;
-        throw std::runtime_error(
-          "bad activity counter at pixel " + std::to_string(e.x()) + "," + std::to_string(e.y()));
-      }
-#endif
-      s.decNumEventsInQueue();
-      if (!s.isActive()) {
-// #define SPATIAL_FILTER_5x5
-#ifdef SPATIAL_FILTER_5x5
-        s =
-          spatial_filter::filter<State, 5>(&state_[0], e.x(), e.y(), width_, height_, GAUSSIAN_5x5);
-#else
-        // s =  spatial_filter::filter<State, 3>(&state_[0], e.x(), e.y(), width_, height_, GAUSSIAN_3x3);
-        s = spatial_filter::filter_3x3(state_.data(), e.x(), e.y(), width_, height_, GAUSSIAN_3x3);
-#endif
-        auto & tile = state_[getTileIdx(e.x(), e.y())];  // state of top left corner of tile
-#ifdef SANITY_CHECKS
-        if (tile.getNumPixActive() == 0) {
-          std::cerr << e.x() << " " << e.y() << " tile " << getTileIdx(e.x(), e.y()) << " is empty!"
-                    << std::endl;
-          throw std::runtime_error(
-            "empty tile at " + std::to_string(e.x()) + "," + std::to_string(e.y()));
-        }
-#endif
-        // remove number of pixels in this tile
-        tile.decNumPixActive();
-        if (tile.getNumPixActive() == 0) {
-          num_occupied_tiles_ -= fill_ratio_num_;
-        }
-        num_occupied_pixels_ -= fill_ratio_denom_;
-        num_filtered_++;
-      }
-      events_.pop_front();  // remove element now
-    }
-    // adjust event window size up or down to match the fill ratio:
-    // new_size = old_size * current_fill_ratio / desired_fill_ratio
-    // The idea is that as the event window increases, the features will "fill out"
-#define AVOID_DIVISION
-#ifdef AVOID_DIVISION
-    const int64_t ntfn = num_occupied_tiles_;
-    int64_t npfd = num_occupied_pixels_;
-    if (UNLIKELY(npfd <= 1)) {
-      npfd = fill_ratio_denom_;
-    }
-    if (LIKELY(std::abs(500 * (ntfn - npfd)) > npfd)) {
-      const uint64_t target_size = (event_window_size_ * ntfn) / npfd;
-      // prevent the event window from collapsing to zero and from growing without bounds
-      event_window_size_ = std::max(min_window_size_, std::min(max_window_size_, target_size));
-    }
-#else
-    const uint64_t target_size = (event_window_size_ * num_occupied_tiles_) /
-                                 (std::max(num_occupied_pixels_, fill_ratio_denom_));
-    event_window_size_ = std::max(min_window_size_, std::min(max_window_size_, target_size));
-#endif
-  }
-
   size_t getWidth() const { return (width_); }
   size_t getHeight() const { return (height_); }
-  size_t getCurrentQueueSize() const { return (events_.size()); }
-  double getCurrentFillRatio() const
+  const auto & getState() const { return (state_); }
+
+  void computeAlphaBeta(const double T_cut, double * alpha, double * beta)
   {
-    return (
-      num_occupied_tiles_ == 0 ? -1.0
-                               : static_cast<double>(num_occupied_pixels_) /
-                                   (num_occupied_tiles_ * tile_size * tile_size));
-  }
-
-  const std::vector<State> & getState() const { return (state_); }
-
-  size_t getEventWindowSize() const { return (event_window_size_); }
-
-  inline size_t getTileIdx(uint16_t ex, uint16_t ey) const
-  {
-    return (getTileIndex<tile_size>(ex, ey, tile_stride_y_));
-  }
-
-  void initialize(size_t width, size_t height, uint32_t cutoff_time, double fill_ratio)
-  {
-    width_ = width;
-    height_ = height;
-    // compute filter coefficients
-    double alpha(0);
-    double beta(0);
-    computeAlphaBeta(static_cast<double>(cutoff_time), &alpha, &beta);
-    c_[0] = static_cast<float>(alpha);
-    c_[1] = static_cast<float>(1.0 - alpha);
-    c_[2] = static_cast<float>(beta);
-    c_[3] = static_cast<float>(0.5 * (1 + beta));
-    state_.resize(width * height, State());
-    tile_stride_y_ = width * tile_size;
-    constexpr int max_area = 1 << 7;
-    if (tile_size * tile_size > max_area) {
-      // guard against overflow of count of occupied pixels in tile
-      std::cerr << "activity tile size too big: " << tile_size << " must be < "
-                << static_cast<int>(std::sqrt(max_area)) << std::endl;
-      throw(std::runtime_error("activity tile size too big"));
-    }
-    // disable any queue usage if tile size is set to zero
-    max_window_size_ = tile_size > 0 ? static_cast<uint64_t>(width_ * height_) : 0;
-    setFillRatio(fill_ratio);
+    // compute the filter coefficients alpha and beta (see frequency cam paper)
+    const double omega_cut = 2 * M_PI / T_cut;
+    const double phi = 2 - std::cos(omega_cut);
+    *alpha = (1.0 - std::sin(omega_cut)) / std::cos(omega_cut);
+    *beta = phi - std::sqrt(phi * phi - 1.0);  // see paper
   }
 
   void getImage(uint8_t * img, size_t stride) const
@@ -235,6 +123,99 @@ public:
         img[y_off + ix] = static_cast<uint8_t>((s.getL() - min_L) * scale);
       }
     }
+  }
+
+  // ------------------- variables ------------------
+  size_t width_{0};
+  size_t height_{0};
+  std::vector<State<filter_spatially>> state_;  // filter state
+  std::array<float, 4> c_{0, 0, 0, 0};          // filter coefficients
+};
+
+// ---------------------------------------------------------------------
+// template declaration
+//
+template <bool filter_spatially = true, uint8_t tile_size = 2>
+class ImageReconstructor : public BaseImageReconstructor<filter_spatially>
+{
+public:
+  ImageReconstructor() = default;
+};
+
+// ---------------------------------------------------------------------
+// specialization for no spatial filtering
+//
+template <uint8_t tile_size>
+class ImageReconstructor<false, tile_size> : public BaseImageReconstructor<false>
+{
+public:
+  ImageReconstructor() = default;
+  void event(uint32_t t, uint16_t ex, uint16_t ey, uint8_t polarity)
+  {
+    auto & s = state_[ey * width_ + ex];
+    BaseImageReconstructor<false>::update_filter(s, t, ex, ey, polarity);
+  }
+};
+// ---------------------------------------------------------------------
+// specialization for spatial filtering
+//
+template <uint8_t tile_size>
+class ImageReconstructor<true, tile_size> : public BaseImageReconstructor<true>
+{
+public:
+  ImageReconstructor() = default;
+  using state_t = float;
+  static constexpr std::array<std::array<state_t, 3>, 3> GAUSSIAN_3x3 = {
+    {{0.0625, 0.125, 0.0625}, {0.125, 0.25, 0.125}, {0.0625, 0.125, 0.0625}}};
+  static constexpr std::array<std::array<state_t, 5>, 5> GAUSSIAN_5x5 = {
+    {{0.003663, 0.01465201, 0.02564103, 0.01465201, 0.003663},
+     {0.01465201, 0.05860806, 0.0952381, 0.05860806, 0.01465201},
+     {0.02564103, 0.0952381, 0.15018315, 0.0952381, 0.02564103},
+     {0.01465201, 0.05860806, 0.0952381, 0.05860806, 0.01465201},
+     {0.003663, 0.01465201, 0.02564103, 0.01465201, 0.003663}}};
+
+  void event(uint32_t t, uint16_t ex, uint16_t ey, uint8_t polarity)
+  {
+    auto & s = state_[ey * width_ + ex];
+    BaseImageReconstructor<true>::update_filter(s, t, ex, ey, polarity);
+    if (!s.isActive()) {
+      num_occupied_pixels_ += fill_ratio_denom_;
+      // state of top left corner of tile has actual pixel-in-tile count
+      auto & tile = state_[getTileIdx(ex, ey)];
+      if (tile.getNumPixActive() == 0) {
+        num_occupied_tiles_ += fill_ratio_num_;  // first active pixel in this tile
+      }
+      tile.incNumPixActive();  // bump number of pixels in this tile
+    }
+    s.incNumEventsInQueue();
+    events_.push_back(Event(ex, ey, static_cast<int8_t>(polarity)));
+    processEventQueue();  // adjusts size of event window
+  };
+
+  size_t getCurrentQueueSize() const { return (events_.size()); }
+  double getCurrentFillRatio() const
+  {
+    return (
+      num_occupied_tiles_ == 0 ? -1.0
+                               : static_cast<double>(num_occupied_pixels_) /
+                                   (num_occupied_tiles_ * tile_size * tile_size));
+  }
+
+  inline size_t getEventWindowSize() const { return (event_window_size_); }
+  void initialize(size_t width, size_t height, uint32_t cutoff_time, double fill_ratio)
+  {
+    BaseImageReconstructor<true>::initialize(width, height, cutoff_time);
+    tile_stride_y_ = width * tile_size;
+    constexpr int max_area = 1 << 7;
+    if (tile_size * tile_size > max_area) {
+      // guard against overflow of count of occupied pixels in tile
+      std::cerr << "activity tile size too big: " << tile_size << " must be < "
+                << static_cast<int>(std::sqrt(max_area)) << std::endl;
+      throw(std::runtime_error("activity tile size too big"));
+    }
+    // disable any queue usage if tile size is set to zero
+    max_window_size_ = tile_size > 0 ? static_cast<uint64_t>(width_ * height_) : 0;
+    setFillRatio(fill_ratio);
   }
 
   void getActivePixelImage(uint8_t * img, size_t stride) const
@@ -307,6 +288,75 @@ public:
 #endif
 
 private:
+  inline size_t getTileIdx(uint16_t ex, uint16_t ey) const
+  {
+    return (getTileIndex<tile_size>(ex, ey, tile_stride_y_));
+  }
+
+  void processEventQueue()
+  {
+    while (events_.size() > event_window_size_) {
+      const Event & e = events_.front();
+      auto & s = state_[e.y() * width_ + e.x()];
+#ifdef SANITY_CHECKS
+      if (!s.isActive()) {
+        std::cerr << "FIBAR: pixel at (" << e.x() << "," << e.y() << ") has bad activity counter!"
+                  << std::endl;
+        std::cerr << "FIBAR: likely this is a hot(bad) pixel. Mask it out in the camera driver!"
+                  << std::endl;
+        throw std::runtime_error(
+          "bad activity counter at pixel " + std::to_string(e.x()) + "," + std::to_string(e.y()));
+      }
+#endif
+      s.decNumEventsInQueue();
+      if (!s.isActive()) {
+#ifdef SPATIAL_FILTER_5x5
+        s =
+          spatial_filter::filter<State, 5>(&state_[0], e.x(), e.y(), width_, height_, GAUSSIAN_5x5);
+#else
+        // s =  spatial_filter::filter<State, 3>(&state_[0], e.x(), e.y(), width_, height_, GAUSSIAN_3x3);
+        s = spatial_filter::filter_3x3(state_.data(), e.x(), e.y(), width_, height_, GAUSSIAN_3x3);
+#endif
+        auto & tile = state_[getTileIdx(e.x(), e.y())];  // state of top left corner of tile
+#ifdef SANITY_CHECKS
+        if (tile.getNumPixActive() == 0) {
+          std::cerr << e.x() << " " << e.y() << " tile " << getTileIdx(e.x(), e.y()) << " is empty!"
+                    << std::endl;
+          throw std::runtime_error(
+            "empty tile at " + std::to_string(e.x()) + "," + std::to_string(e.y()));
+        }
+#endif
+        // remove number of pixels in this tile
+        tile.decNumPixActive();
+        if (tile.getNumPixActive() == 0) {
+          num_occupied_tiles_ -= fill_ratio_num_;
+        }
+        num_occupied_pixels_ -= fill_ratio_denom_;
+      }
+      events_.pop_front();  // remove element now
+    }
+    // adjust event window size up or down to match the fill ratio:
+    // new_size = old_size * current_fill_ratio / desired_fill_ratio
+    // The idea is that as the event window increases, the features will "fill out"
+#define AVOID_DIVISION
+#ifdef AVOID_DIVISION
+    const int64_t ntfn = num_occupied_tiles_;
+    int64_t npfd = num_occupied_pixels_;
+    if (UNLIKELY(npfd <= 1)) {
+      npfd = fill_ratio_denom_;
+    }
+    if (LIKELY(std::abs(500 * (ntfn - npfd)) > npfd)) {
+      const uint64_t target_size = (event_window_size_ * ntfn) / npfd;
+      // prevent the event window from collapsing to zero and from growing without bounds
+      event_window_size_ = std::max(min_window_size_, std::min(max_window_size_, target_size));
+    }
+#else
+    const uint64_t target_size = (event_window_size_ * num_occupied_tiles_) /
+                                 (std::max(num_occupied_pixels_, fill_ratio_denom_));
+    event_window_size_ = std::max(min_window_size_, std::min(max_window_size_, target_size));
+#endif
+  }
+
   class Event
   {
   public:
@@ -319,20 +369,6 @@ private:
     uint16_t ex{0};
     uint16_t ey{0};
   };
-  void computeAlphaBeta(const double T_cut, double * alpha, double * beta)
-  {
-    // compute the filter coefficients alpha and beta (see frequency cam paper)
-    const double omega_cut = 2 * M_PI / T_cut;
-    const double phi = 2 - std::cos(omega_cut);
-    *alpha = (1.0 - std::sin(omega_cut)) / std::cos(omega_cut);
-    *beta = phi - std::sqrt(phi * phi - 1.0);  // see paper
-  }
-
-  // ------------------- variables ------------------
-  size_t width_{0};
-  size_t height_{0};
-  std::vector<State> state_;            // filter state
-  std::array<float, 4> c_{0, 0, 0, 0};  // filter coefficients
   // ---------- related to activity detection
   static constexpr int START_WINDOW_SIZE = 2000;
   uint16_t tile_stride_y_{0};                      // size of stride in tiled image
@@ -344,9 +380,6 @@ private:
   uint64_t max_window_size_{0};                    // maximum size of event window
   uint64_t min_window_size_{0};                    // minimum size of event window
   std::deque<Event> events_;                       // queue with buffered events
-  // -------- debugging
-  uint32_t current_time_{0};
-  uint32_t num_filtered_{0};
 };
 }  // namespace fibar_lib
 #endif  // FIBAR_LIB_IMAGE_RECONSTRUCTOR_HPP

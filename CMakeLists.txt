@@ -24,7 +24,7 @@ include (GNUInstallDirs)
 set(ignoreMe "${CMAKE_EXPORT_COMPILE_COMMANDS}") # suppress warnings
 
 add_library(${PROJECT_NAME} INTERFACE)
-set_target_properties(${PROJECT_NAME} PROPERTIES  CXX_STANDARD 14)
+set_target_properties(${PROJECT_NAME} PROPERTIES  CXX_STANDARD 17)
 target_include_directories(
     ${PROJECT_NAME}
   INTERFACE
