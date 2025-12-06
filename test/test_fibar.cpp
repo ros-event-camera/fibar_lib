@@ -20,10 +20,10 @@
 static const int WIDTH = 640;
 static const int HEIGHT = 480;
 
-std::shared_ptr<fibar_lib::ImageReconstructor<2>> createReconstructor(
+std::shared_ptr<fibar_lib::ImageReconstructor<true, 2>> createReconstructor(
   const int w, const int h, const int T_cut, const float fill_ratio)
 {
-  auto reconstructor = std::make_shared<fibar_lib::ImageReconstructor<2>>();
+  auto reconstructor = std::make_shared<fibar_lib::ImageReconstructor<true, 2>>();
   reconstructor->initialize(w, h, T_cut, fill_ratio);
   EXPECT_EQ(w, reconstructor->getWidth());
   EXPECT_EQ(h, reconstructor->getHeight());
