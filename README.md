@@ -15,6 +15,7 @@ Currently tested for long-term Ubuntu 22.04 and later.
 ## How to build
 
 Set the following shell variables:
+
 ```bash
 repo=fibar_lib
 url=https://github.com/ros-event-camera/${repo}.git
@@ -27,7 +28,8 @@ Since this package is a ROS-free cmake package, you can also just use the standa
 ## How to run tests
 
 Before committing changes to the repo, run the tests as follows at the top of the ROS workspace.
-```
+
+```bash
 rm -rf build_test; mkdir build_test; cd build_test; cmake ../src/fibar_lib/ -DBUILD_TESTING=ON; make; make test; make format_check; cd ..
 ```
 
