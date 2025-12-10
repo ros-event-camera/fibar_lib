@@ -6,6 +6,7 @@
   <maintainer email="bernd.pfrommer@gmail.com">Bernd Pfrommer</maintainer>
   <license>Apache License 2.0</license>
   <depend>clang-tidy</depend>
+  <buildtool_depend>cmake</buildtool_depend>
   <test_depend>gtest</test_depend>
   <export>
     <build_type>cmake</build_type>
