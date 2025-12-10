@@ -2,6 +2,11 @@
 Changelog for package fibar_lib
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+Forthcoming
+-----------
+* added buildtool_depend on cmake
+* Contributors: Bernd Pfrommer
+
 1.0.1 (2025-12-06)
 ------------------
 * more templating to make spatial filter optional
